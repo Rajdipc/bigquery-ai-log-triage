@@ -1,7 +1,11 @@
 # 🎟️ BigQuery AI Log Triage
 
-**A two-tier AI log triage router written entirely in BigQuery SQL.**
-`AI.IF` filters out noise, `AI.CLASSIFY` + `AI.SCORE` rank the blast radius, and only severity ≥ 8 incidents are escalated to a stronger model through `AI.GENERATE`. No pipelines, no Python, no orchestration. Just SQL.
+> ### ⚛️ Hydrogen filters. Carbon diagnoses. All inside BigQuery.
+
+**A two-tier AI log triage router written entirely in BigQuery SQL, using Gemini Hydrogen and Gemini Carbon.**
+**Hydrogen** (`gemini-4-hydrogen`) runs `AI.IF`, `AI.CLASSIFY` and `AI.SCORE` on every log to filter noise and rank the blast radius. Only severity ≥ 8 incidents are escalated to **Carbon** (`gemini-4-carbon`) for root cause and fix via `AI.GENERATE`. No pipelines, no Python, no orchestration. Just SQL.
+
+**Result:** 59 of 65 model calls (~91%) ran on Hydrogen. Carbon was called only 6 times, for the incidents that mattered.
 
 ![BigQuery](https://img.shields.io/badge/BigQuery-AI%20functions-4285F4?logo=googlecloud&logoColor=white)
 ![SQL](https://img.shields.io/badge/100%25-SQL-336791)
@@ -33,20 +37,20 @@ During a high-traffic event, on-call engineers get flooded with logs. Most are r
 
 This repo shows a **model cascade** built entirely in BigQuery SQL:
 
-- A **light model** handles filtering, classification, scoring and short summaries.
-- A **strong model** is called only for the few incidents that really matter.
+- ⚡ **Hydrogen**, the fast, high-volume tier, handles filtering, classification, scoring and short summaries on every log.
+- 🧠 **Carbon**, the deep-reasoning tier, is called only for the few incidents that really matter.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[("cloud_logs.app_logs<br/>20 raw log lines")] --> B{"AI.IF<br/>real signal?"}
+    A[("cloud_logs.app_logs<br/>20 raw log lines")] --> B{"Hydrogen: AI.IF<br/>real signal?"}
     B -- "no (routine)" --> X["dropped"]
-    B -- yes --> C["AI.CLASSIFY<br/>7 domains"]
-    C --> D["AI.SCORE<br/>blast radius 1-10"]
+    B -- yes --> C["Hydrogen: AI.CLASSIFY<br/>7 domains"]
+    C --> D["Hydrogen: AI.SCORE<br/>blast radius 1-10"]
     D --> E{"severity ≥ 8?"}
-    E -- yes --> F["Strong model<br/>AI.GENERATE<br/>root cause + fix"]
-    E -- no --> G["Light model<br/>AI.GENERATE<br/>10-word summary"]
+    E -- yes --> F["Carbon<br/>AI.GENERATE<br/>root cause + fix"]
+    E -- no --> G["Hydrogen<br/>AI.GENERATE<br/>10-word summary"]
     F --> H[("cloud_logs.triage_results")]
     G --> H
     H --> R["Reports<br/>no AI calls"]
@@ -54,11 +58,11 @@ flowchart LR
 
 | Stage | Function | Model | Output |
 |---|---|---|---|
-| Filter | `AI.IF` | light (`gemini-4-hydrogen`) | `BOOL`: keep or drop |
-| Classify | `AI.CLASSIFY` | light | one of 7 domains |
-| Score | `AI.SCORE` | light | `FLOAT64` blast radius 1–10 |
-| Diagnose (severity ≥ 8) | `AI.GENERATE` | **strong** (`gemini-4-carbon`) | root cause + fastest mitigation (≤ 16 words) |
-| Diagnose (severity < 8) | `AI.GENERATE` | light | triage summary (≤ 10 words) |
+| Filter | `AI.IF` | **Hydrogen** (`gemini-4-hydrogen`) | `BOOL`: keep or drop |
+| Classify | `AI.CLASSIFY` | Hydrogen | one of 7 domains |
+| Score | `AI.SCORE` | Hydrogen | `FLOAT64` blast radius 1–10 |
+| Diagnose (severity ≥ 8) | `AI.GENERATE` | **Carbon** (`gemini-4-carbon`) | root cause + fastest mitigation (≤ 16 words) |
+| Diagnose (severity < 8) | `AI.GENERATE` | Hydrogen | triage summary (≤ 10 words) |
 
 The router also computes, with plain SQL:
 - `action`: `P0 - page on-call` (≥ 8) / `P2 - open ticket` (≥ 5) / `P4 - log only`
@@ -72,8 +76,8 @@ The router also computes, with plain SQL:
 | Tier | Count | Examples | Expected route |
 |---|---|---|---|
 | Routine INFO | 5 | queue open, seat-map publish, CDN purge, push batch, SLO report | dropped by `AI.IF` |
-| Single-service WARN/ERROR | 9 | bot attack blocked, seat-lock race, price guardrail, SMTP 421, slow UPI callbacks, model drift, resale rejection (**JSON**), cosmetic gRPC timeout | light model |
-| Cascading P0 | 6 | oversold seats, checkout circuit breaker open, CDN cookie-strip redirect loop, disabled JWT signing key, CoreDNS NXDOMAIN storm, ticket issuance stalled | **strong model** |
+| Single-service WARN/ERROR | 9 | bot attack blocked, seat-lock race, price guardrail, SMTP 421, slow UPI callbacks, model drift, resale rejection (**JSON**), cosmetic gRPC timeout | Hydrogen |
+| Cascading P0 | 6 | oversold seats, checkout circuit breaker open, CDN cookie-strip redirect loop, disabled JWT signing key, CoreDNS NXDOMAIN storm, ticket issuance stalled | **Carbon** |
 
 ### 🪤 Trap #1: the word "error" in a healthy log
 ```
@@ -107,7 +111,7 @@ bq query --use_legacy_sql=false < sql/03_reports.sql              # reports (no 
 ```
 
 > [!TIP]
-> **Model endpoints:** the scripts use `gemini-4-hydrogen` (light) and `gemini-4-carbon` (strong). To use other models, find and replace those two names across `sql/` and `diagnostics/`.
+> **Model endpoints:** the scripts use `gemini-4-hydrogen` (Hydrogen, fast tier) and `gemini-4-carbon` (Carbon, deep-reasoning tier). To use other models, find and replace those two names across `sql/` and `diagnostics/`.
 
 ## Results
 
@@ -159,8 +163,12 @@ Use [`diagnostics/find_dropped_rows.sql`](diagnostics/find_dropped_rows.sql) to 
 ## Cost and design notes
 
 - **Results are saved once.** Step 2 writes `cloud_logs.triage_results`, and all three reports read from it with **0 AI calls**.
-- **The cascade cuts strong-model calls:** of 20 logs, only **6** reach the strong model. The other 15 are handled entirely by the light model (5 dropped, 9 summarised).
-- **Calls per full run:** about 20 `AI.IF`, 15 `AI.CLASSIFY`, 15 `AI.SCORE` and 15 `AI.GENERATE`.
+- **Hydrogen carries the volume, Carbon carries the depth:**
+
+  | Model | AI.IF | AI.CLASSIFY | AI.SCORE | AI.GENERATE | Total |
+  |---|---:|---:|---:|---:|---:|
+  | Hydrogen | 20 | 15 | 15 | 9 | **59 (~91%)** |
+  | Carbon | – | – | – | 6 | **6 (~9%)** |
 - **Mixed formats:** plain-text and JSON log lines are parsed in the same query (`STARTS_WITH(log_entry, '{')`).
 
 ## Adapting it to your logs
